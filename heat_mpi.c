@@ -241,11 +241,42 @@ int get_new_borders_odd(int test_kind, int rank, int size, int st, int fn, int *
 	return 0;
 }
 
-int should_reallocate(int st, int fn, int st_new, int fn_new) {
-
+int should_reallocate(int st, int fn, int st_new, int fn_new, double regularization) {
+	if (fn - st <= 0)
+		if (fn_new - st_new <= 0)
+			return 0;
+		else 
+			return 1;
+	if (1 - (fn_new - st_new) / (fn - st) > regularization)
+		return 1;
+	return 0; 
 }
 
-int resize_tasks(int test_kind, int to_fill, int rank, int size, int *st, int *fn, int test_difficulty, int out) 
+
+int reallocate_status_exchange(int test_kind, int rank, int size, int should)
+{
+	int should_neigh = 0;
+	if (!(rank%2)) {
+		if (test_kind && rank != size - 1) {
+			MPI_Recv(&should_neigh, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			MPI_Send(&should, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
+		} else if (rank) {
+			MPI_Recv(&should_neigh, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			MPI_Send(&should, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
+		}
+	} else {
+		if (test_kind) {
+			MPI_Send(&should, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
+			MPI_Recv(&should_neigh, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		} else if (rank != size - 1) { 
+			MPI_Send(&should, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
+			MPI_Recv(&should_neigh, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		}
+	}
+	return max(should, should_neigh);
+}
+
+int resize_tasks(int test_kind, int to_fill, int rank, int size, int *st, int *fn, int test_difficulty, double regularization, int out) 
 {
 	int st_new = 0;
 	int fn_new = 0;
@@ -256,17 +287,27 @@ int resize_tasks(int test_kind, int to_fill, int rank, int size, int *st, int *f
 		get_new_borders_odd(test_kind, rank, size, *st, *fn, &st_new, &fn_new, test_difficulty);
 
 	if (out)
-		printf("resize_tasks: rank = %d, size = %d, test_kind = %d, st = %d, fn = %d, st_new = %d, fn_new = %d",\
+		printf("resize_tasks: rank = %d, size = %d, test_kind = %d, st = %d, fn = %d, st_new = %d, fn_new = %d\n",\
 			rank, size, test_kind, *st, *fn, st_new, fn_new);
 
-	if (!should_reallocate(*st, *fn, st_new, fn_new))
+
+	int should = should_reallocate(*st, *fn, st_new, fn_new, regularization);
+	if (out)
+		printf("resize_tasks: rank = %d, size = %d, test_kind = %d, should (before exchange) = %d\n", rank, size, test_kind, should);
+	should = reallocate_status_exchange(test_kind, rank, size, should);
+	if (out)
+		printf("resize_tasks: rank = %d, size = %d, test_kind = %d, should (after exchange) = %d\n", rank, size, test_kind, should);
+	
+	if (!should)	
 		return 0;
 
+	// Exchange should happen here.
 
 	return 1;
 
 }
 
+int reallocate
 
 int get_borders_initial(int rank, int size, int *st, int *fn, double rate, int N, int out) {
 	if (!rank) {
