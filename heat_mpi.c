@@ -15,60 +15,6 @@ void test_task(int param)
 	}
 }
 
-void divide_proportion(int size, double *rates, int *sts, int *fns, int N, int out) 
-{
-	double total_rate = 0;
-	for (int i = 0; i < size; i++)
-		total_rate += rates[i];
-
-	if (out) {
-		printf("Rates:\n");
-		for (int i = 0; i < size; i++)
-			printf("%f ", rates[i]);
-		printf("\ntotal_rate = %f\n", total_rate);
-	}
-	sts[0] = 1;
-	for (int i = 0; i < size - 1; i++) {
-		fns[i] = sts[i] + (int) (rates[i] * N / total_rate);
-		sts[i + 1] = fns[i] + 1;		
-	}
-	
-	fns[size - 1] = N;
-}
-
-int get_borders(int rank, int size, int *st, int *fn, double rate, int N, int out) {
-	if (!rank) {
-		double *rates = (double *)calloc(size, sizeof(double));
-		assert(rates);
-		rates[0] = rate;
-		int *sts = (int *)calloc(size, sizeof(int));
-		int *fns = (int *)calloc(size, sizeof(int));
-		int i = 0;
-		for (i = 1; i < size; i++)
-			MPI_Recv(rates + i, 1, MPI_DOUBLE, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		divide_proportion(size, rates, sts, fns, N, out);	
-
-		for (i = 1; i < size; i++) {
-			int params[2] = {};
-			params[0] = sts[i];
-			params[1] = fns[i];
-			MPI_Send(params, 2, MPI_INT, i, 0, MPI_COMM_WORLD); // Try MPI_Ibsend 
-		}
-		*st = sts[0];
-		*fn = fns[0];
-		free(rates);
-		free(sts);
-		free(fns);
-	} else {
-		MPI_Send(&rate, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-		int params[2] = {};
-		MPI_Recv(params, 2, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		*st = params[0];
-		*fn = params[1];
-	}
-
-	return 0;
-}
 
 double get_rate(int param)
 {
@@ -78,14 +24,39 @@ double get_rate(int param)
 	return 1/time_duration;
 }
 
-int manage_memory(double *u[2], int mem, int req, double mem_multrate) 
+int max(int a, int b)
+{
+	if (a > b)
+		return a;
+	return b;
+}
+
+int manage_memory(double *u[2], int mem, int req) 
 {
 	if (mem >= req) {
-		if (mem > req * mem_multrate)
-			mem = realloc(u[0], (int)req * mem_multrate);
-		return mem;
-	} else 
-		mem = realloc(u[0], (int)req * mem_multrate);
+		if (mem > req * 2) {
+			u[0] = realloc(u[0], (int)mem / 2);
+			u[1] = realloc(u[1], (int)mem / 2);
+		return mem / 2;
+	} else {
+		u[0] = realloc(u[0], max(req, mem * 2));
+		u[1] = realloc(u[1], max(req, mem * 2);
+		return max(req, mem * 2);
+	}
+	return 0; // Shouldn't get here.
+}
+
+
+
+int	init_memory(double *u, st, fn, N, TS, T1, T2)
+{
+	int mem = fn - st + 1 + 2;
+	for (int i = 0; i < mem; i++)
+		u[i] = TS;
+	if (st == 1)
+		u[0] = T1;
+	if (fn == N)
+		u[mem - 1] = T2;
 	return 0;
 }
 
@@ -103,9 +74,11 @@ int main(int argc, char **argv)
 	double C = atof(argv[7]);
 	double out = atoi(argv[8]);
 	int test_difficulty = atoi(argv[9]);
+
+	// Number of iterations between tests. If zero then no testing is made.
 	int iters_test = atoi(argv[10]);
 
-	if (N <= 0 || T <= 0 || Length <= 0 || T1 < 0 || T2 < 0 || TS < 0 || C <= 0) {
+	if (N <= 0 || T <= 0 || Length <= 0 || T1 < 0 || T2 < 0 || TS < 0 || C <= 0 || iters_test < 0) {
 		printf("Bad arguments\n");
 		return 0;
 	}
@@ -115,6 +88,8 @@ int main(int argc, char **argv)
 	double h =  Length / N; // I don't no why division by N - 1 in previous program 
 	double dt = 0.3 * h * h / C;
 	int steps = T / dt;
+	assert(steps > 0);
+
 	int un = 1;
 	int mem = 0;
 	int rank, size;
@@ -123,23 +98,35 @@ int main(int argc, char **argv)
 	MPI_Comm_size(MPI_COMM_WORLD, &size);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
+	double rate = get_rate(test_difficulty);
 
+	int st = 0; 
+	int fn = 0;	
 
-	for (int i = 0; i < steps; i++) {
-		if (i % iters_test == 0) {
-
-			double rate = get_rate(test_difficulty);
-
-			int st_new = 0;
-			int fn_new = 0;
-			get_borders(rank, size, &st_new, &fn_new, rate, N, out);
-			if (out)
-				printf("Step = %d. Recalibration = %d. Rank = %d. Rate = %f. Borders: st = %d, fn = %d.\n",\
-				i, i / iters_test, rank, rate, st_new, fn_new);
-			int new_mem = manage_memory(u, mem, fn_new - st_new + 1);
-		}
-	}
+	get_borders(rank, size, st, fn, rate, N, out);
+	if (out)
+		printf("Step = %d. Recalibration = %d. Rank = %d. Rate = %f. Borders: st = %d, fn = %d.\n",\
+		i, i / iters_test, rank, rate, st_new, fn_new);
 	
+	
+	int req_mem = fn - st + 1 + 2;
+	int mem = manage_memory(u, 0, req_mem); // This variable will held the amount of memory process holds.
+	int test_kind = 1; // 1 - means that even sends to process with bigger number. 0 - vice verse. 
+
+	init_memory(u[0], mem, st, fn, N, TS, T1, T2);
+	int to_fill = 1; // 1 - means, that on the next step we fill array with number 1. 0 -//- with 0.
+	for (int i = 0; i < steps; i++) {
+		if (iters_test && i && !(i % iters_test)) {
+			resize_tasks(test_kind, to_fill, rank, size, &st, &fn, test_difficulty, out);
+			int get_borders_initial(int rank, int size, int *st, int *fn, double rate, int N, int out) {
+
+			test_kind = !test_kind;
+		}	
+		make_step(u, mem, rank, size)
+
+	}
+
+
 	// /* Выделение памяти. */
 	// u[0] = (double*)calloc(N, sizeof(double));
 	// u[1] = (double*)calloc(N, sizeof(double));
@@ -198,3 +185,142 @@ int main(int argc, char **argv)
 	MPI_Finalize();
 	return 0;
 }
+
+
+int get_new_borders_even(int test_kind, int rank, int size, int st, int fn, int *st_new, int *fn_new, int test_difficulty)
+{
+	double rate = get_rate(test_difficulty);
+	double rate_neigh = 0;
+	if (test_kind && rank != size - 1) {
+		MPI_Recv(&rate_neigh, 1, MPI_DOUBLE, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		MPI_Recv(&fn, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		
+		int middle = (int) rate * (fn - st) / (rate + rate_neigh);
+		
+		*st_new = st;
+		*fn_new = st + middle;
+
+		int st_neigh = st + middle + 1;
+		MPI_Send(&st_neigh, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);	
+	} else if (!test_kind && rank) { 
+		MPI_Recv(&rate_neigh, 1, MPI_DOUBLE, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		MPI_Recv(&st, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+		int middle = (int) rate * (fn - st) / (rate + rate_neigh);
+		*st_new = st + middle + 1;
+		*fn_new = fn;
+		int fn_neigh = st + middle;
+		MPI_Send(&fn_neigh, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
+	} else {
+		*st_new = st;
+		*fn_new = fn;
+	}
+	return 0;
+}
+
+
+int get_new_borders_odd(int test_kind, int rank, int size, int st, int fn, int *st_new, int *fn_new, int test_difficulty)
+{
+	double rate = get_rate(test_difficulty);
+	if (test_kind) {
+		MPI_Send(&rate, 1, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD);
+		MPI_Send(&fn, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
+
+		*fn_new = fn;
+		MPI_Recv(st_new, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	} else if (rank != size - 1) {
+		MPI_Send(&rate, 1, MPI_DOUBLE, rank + 1, 0, MPI_COMM_WORLD);
+		MPI_Send(&st, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
+
+		*st_new = st;
+		MPI_Recv(fn_new, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	} else {
+		*st_new = st;
+		*fn_new = fn;
+	}
+	return 0;
+}
+
+int should_reallocate(int st, int fn, int st_new, int fn_new) {
+
+}
+
+int resize_tasks(int test_kind, int to_fill, int rank, int size, int *st, int *fn, int test_difficulty, int out) 
+{
+	int st_new = 0;
+	int fn_new = 0;
+
+	if (!(rank%2))
+		get_new_borders_even(test_kind, rank, size, *st, *fn, &st_new, &fn_new, test_difficulty);
+	else 
+		get_new_borders_odd(test_kind, rank, size, *st, *fn, &st_new, &fn_new, test_difficulty);
+
+	if (out)
+		printf("resize_tasks: rank = %d, size = %d, test_kind = %d, st = %d, fn = %d, st_new = %d, fn_new = %d",\
+			rank, size, test_kind, *st, *fn, st_new, fn_new);
+
+	if (!should_reallocate(*st, *fn, st_new, fn_new))
+		return 0;
+
+
+	return 1;
+
+}
+
+
+int get_borders_initial(int rank, int size, int *st, int *fn, double rate, int N, int out) {
+	if (!rank) {
+		double *rates = (double *)calloc(size, sizeof(double));
+		assert(rates);
+		rates[0] = rate;
+		int *sts = (int *)calloc(size, sizeof(int));
+		int *fns = (int *)calloc(size, sizeof(int));
+		int i = 0;
+		for (i = 1; i < size; i++)
+			MPI_Recv(rates + i, 1, MPI_DOUBLE, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		get_borders_initial_divide_proportion(size, rates, sts, fns, N, out);	
+
+		for (i = 1; i < size; i++) {
+			int params[2] = {};
+			params[0] = sts[i];
+			params[1] = fns[i];
+			MPI_Send(params, 2, MPI_INT, i, 0, MPI_COMM_WORLD); // Try MPI_Ibsend 
+		}
+		*st = sts[0];
+		*fn = fns[0];
+		free(rates);
+		free(sts);
+		free(fns);
+	} else {
+		MPI_Send(&rate, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+		int params[2] = {};
+		MPI_Recv(params, 2, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		*st = params[0];
+		*fn = params[1];
+	}
+
+	return 0;
+}
+
+
+void get_borders_initial_divide_proportion(int size, double *rates, int *sts, int *fns, int N, int out) 
+{
+	double total_rate = 0;
+	for (int i = 0; i < size; i++)
+		total_rate += rates[i];
+
+	if (out) {
+		printf("Rates:\n");
+		for (int i = 0; i < size; i++)
+			printf("%f ", rates[i]);
+		printf("\ntotal_rate = %f\n", total_rate);
+	}
+	sts[0] = 1;
+	for (int i = 0; i < size - 1; i++) {
+		fns[i] = sts[i] + (int) (rates[i] * N / total_rate);
+		sts[i + 1] = fns[i] + 1;		
+	}
+	
+	fns[size - 1] = N;
+}
+
