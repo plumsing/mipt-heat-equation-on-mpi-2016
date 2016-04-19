@@ -3,6 +3,13 @@
 #include <mpi.h>
 #include <assert.h>
 
+int reallocate(int rank, int to_fill, double *u[2], int st, int fn, int st_new, int fn_new);
+int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new);
+int reallocate_snd(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new);
+int get_borders_initial(int rank, int size, int *st, int *fn, double rate, int N, int out);
+void get_borders_initial_divide_proportion(int size, double *rates, int *sts, int *fns, int N, int out);
+
+
 void test_task(int param)
 {
 	int i = 0;
@@ -14,7 +21,6 @@ void test_task(int param)
 		a[1] = a[0] * a[1];
 	}
 }
-
 
 double get_rate(int param)
 {
@@ -32,7 +38,7 @@ int max(int a, int b)
 }
 
 int manage_memory(double *u[2], int mem, int req) 
-{
+{	
 	if (mem >= req) {
 		if (mem > req * 2) {
 			u[0] = realloc(u[0], (int)mem / 2);
@@ -301,15 +307,81 @@ int resize_tasks(int test_kind, int to_fill, int rank, int size, int *st, int *f
 	if (!should)	
 		return 0;
 
+
 	// Exchange should happen here.
 
 	return 1;
 
 }
 
-int reallocate
+int reallocate(int rank, int to_fill, double *u[2], int st, int fn, int st_new, int fn_new) 
+{
+	double *u_new[2] = {}; // To initiate new mem.
 
-int get_borders_initial(int rank, int size, int *st, int *fn, double rate, int N, int out) {
+	u_new[0] = (double *)calloc(fn_new - st_new + 3, sizeof(double));
+	assert(u_new[0]); // Can handle this case. Just continue with the same arrays.
+	u_new[1] = (double *)calloc(fn_new - st_new + 3, sizeof(double));
+	assert(u_new[1]);
+
+	u_src = u[!to_fill]; // Array with actual data.
+	u_dst = u_new[!to_fill]; // Array, where we want actual data after reallocation.
+	if (fn - st < fn_new - st_new) 
+		reallocate_rcv(rank, u_dst, u_src, st, fn, st_new, fn_new);
+	else
+		reallocate_snd(rank, u_dst, u_src, st, fn, st_new, fn_new);
+
+	free(u[0]);
+	free(u[1]);
+
+	u[0] = u_new[0];
+	u[1] = u_new[1];
+
+	return 0;
+}
+
+int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
+{
+	int to_rec = (fn_new - st_new) - (fn - st); // How many doubles should receive
+	double *dst_rcmem = u_dst + 1; // address, to where doubles will be received.
+	double *dst_cpmem = u_dst + 1; // address, to where doubles will be copied.
+	
+	int rank_neigh = rank - 1; // From whom I wan't to receive. 
+	if (fn != fn_new) { // st == st_new; fn < fn_new;
+		dst_rcmem += fn - st + 1;
+		rank_neigh += 2;
+	} else // st_new < st; fn == fn_new;
+		dst_cpmem += st - st_new;
+
+
+	MPI_Recv(dst_rcmem, to_rec, MPI_DOUBLE, rank_neigh, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	// fn - st + 1 -> number of bytes that come from old array.
+	memcpy(dst_cpmem, u_src + 1, sizeof(double) * (fn - st + 1));
+
+	return 0;
+}
+
+int reallocate_snd(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
+{
+	int to_send = (fn - st) - (fn_new - st_new); // How many doubles should send.
+	double *src_sdmem = u_src + 1; // address, from which doubles will be sent to neigh.
+	double *src_cpmem = u_src + 1; // address, from which doubles will be copied to u_dst.
+
+	int rank_neigh = rank - 1;
+	if (fn != fn_new) { // Here fn > fn_new; st == st_new
+		src_sdmem += fn_new - st_new + 1;
+		rank_neigh += 2;
+	} else  // Here fn == fn_new; st < st_new
+		src_cpmem += st_new - st;
+	
+	MPI_Send(src_sdmem, to_send, MPI_DOUBLE, rank_neigh, 0, MPI_COMM_WORLD);
+	// fn_new - st_new + 1 -> number of bytes that come from old array.
+	memcpy(u_dst + 1, src_cpmem, sizeof(double) * (fn_new - st_new + 1)); 
+
+	return 0;
+}
+
+int get_borders_initial(int rank, int size, int *st, int *fn, double rate, int N, int out)
+{
 	if (!rank) {
 		double *rates = (double *)calloc(size, sizeof(double));
 		assert(rates);
