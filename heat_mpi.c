@@ -81,8 +81,8 @@ void evaluate(int rank, int size, double *u[2], int st, int fn, int steps, int i
 			double rate = get_rate(test_diffic);
 			resize_tasks(test_kind, s, rank, size, u, &st, &fn, rate, regularization, out);
 			if (out)
-				printf("evaluate: step = %d, recalib = %d, rank = %d, rate = %f, borders: st_new = %d, fn_new = %d.\n",\
-				i, i / iters_test, rank, rate, st, fn);
+				printf("evaluate: step = %d, recalib = %d, rank = %d, borders: st_new = %d, fn_new = %d.\n",\
+				i, i / iters_test, rank, st, fn);
 			test_kind = !test_kind;
 		}	
 		// print_results(u[!s], fn - st + 3);
@@ -287,24 +287,29 @@ int resize_tasks(int test_kind, int s, int rank, int size, double *u[2], int *st
 		get_borders_odd(test_kind, rank, size, *st, *fn, &st_new, &fn_new, rate);
 
 	if (out)
-		printf("resize_tasks: rank = %d, size = %d, test_kind = %d, st = %d, fn = %d, st_new = %d, fn_new = %d\n",\
-			rank, size, test_kind, *st, *fn, st_new, fn_new);
+		printf("resize_tasks: rank = %d, rate = %f, test_kind = %d, st = %d, fn = %d, st_new = %d, fn_new = %d\n",\
+			rank, rate, test_kind, *st, *fn, st_new, fn_new);
 
 
 	int should = should_reallocate(*st, *fn, st_new, fn_new, regularization);
 	if (out)
-		printf("resize_tasks: rank = %d, size = %d, test_kind = %d, should (before exchange) = %d\n", rank, size, test_kind, should);
+		printf("resize_tasks: rank = %d, should (before exchange) = %d\n", rank, should);
 	should = reallocate_status_exchange(test_kind, rank, size, should);
 	if (out)
-		printf("resize_tasks: rank = %d, size = %d, test_kind = %d, should (after exchange) = %d\n", rank, size, test_kind, should);
+		printf("resize_tasks: rank = %d, should (after exchange) = %d\n", rank, should);
 	
-	if (!should) {
-		*st = st_new;
-		*fn = fn_new;
+	// if (!should) {
+	// 	*st = st_new;
+	// 	*fn = fn_new;
+	// 	return 0;
+	// }
+
+	if (!should)
 		return 0;
-	}
 
 	reallocate(rank, s, u, *st, *fn, st_new, fn_new);
+	*st = st_new;
+	*fn = fn_new;
 
 	return 1;
 
