@@ -9,7 +9,10 @@
 
 int main(int argc, char **argv)
 {
-	assert(argc == 12);
+	if (argc != 12) {
+		printf("Bad number of arguments: %d", argc);
+		return 0;
+	}
 
 	int N = atoi(argv[1]);
 	double T = atof(argv[2]);
@@ -35,42 +38,56 @@ int main(int argc, char **argv)
 	MPI_Comm_size(MPI_COMM_WORLD, &size);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
+	if (out)
+		printf("MPI_Init: Rank = %d, Size = %d\n", rank, size);
 
 	int st = 0; 
 	int fn = 0;	
 
-	double rate = get_rate(test_diffic);
-	get_borders_initial(rank, size, &st, &fn, rate, N, out);
+	get_borders_initial(rank, size, &st, &fn, N, out);
 	
 	double *u[2] = {};
 	assert(alloc_mem(u, fn - st + 3));
 	init_memory(u[0], st, fn, N, TS, T1, T2);
 
-	evaluate(rank, size, u, st, fn, steps, iters_test, regularization, out);	
+	evaluate(rank, size, u, st, fn, steps, iters_test, test_diffic, regularization, out);	
 
+	double *res = 0;
+
+	if (!rank) 
+		res = collect_results(size, st, fn, N, u[0], out);
+	else 
+		send_results(rank, st, fn, u[0], out);
 	dealloc_mem(u);
+
+	if (!rank)
+		print_results(res, N);
+	free(res);
+
 	MPI_Finalize();
 	return 0;
 }
 
-void evaluate(int rank, int size, double *u[2], int st, int fn, int steps, int iters_test, double regularization, int out)
+void evaluate(int rank, int size, double *u[2], int st, int fn, int steps, int iters_test, int test_diffic, double regularization, int out)
 {
 
 	int s = 0; // denotes the index of array with actual data.
 	int test_kind = 1; // 1 - means that even sends to process with bigger number. 0 - vice verse. 
+	printf("evaluate: total steps = %d\n", steps);
 	for (int i = 0; i < steps; i++) {
 		if (out == DETAILED_PRINT)
-			printf("Step = %d (< %d). Rank = %d. Size = %d. Borders: st = %d, fn = %d.\n", i, steps, rank, size, st, fn);
-		if (iters_test && i && !(i % iters_test)) {
-			double rate = get_rate(rate);
+			printf("evaluate: step = %d, rank = %d, borders: st = %d, fn = %d.\n", i, rank, st, fn);
+		if (iters_test && !(i % iters_test)) {
+			double rate = get_rate(test_diffic);
 			resize_tasks(test_kind, s, rank, size, u, &st, &fn, rate, regularization, out);
 			if (out)
-				printf("Step = %d. Recalibration = %d. Rank = %d. Rate = %f. Borders: st_new = %d, fn_new = %d.\n",\
+				printf("evaluate: step = %d, recalib = %d, rank = %d, rate = %f, borders: st_new = %d, fn_new = %d.\n",\
 				i, i / iters_test, rank, rate, st, fn);
 			test_kind = !test_kind;
 		}	
+		// print_results(u[!s], fn - st + 3);
 		make_step(u, s, fn - st + 3);
-		borders_filling(rank, size, u, s, fn - st + 3);
+		borders_filling(rank, size, u, s, fn - st + 3, out);
 		s = !s;
 	}
 }
@@ -82,29 +99,52 @@ void make_step(double *u[2], int s, int mem)
 		u[!s][i] =  u[s][i] + 0.3 * (u[s][i-1] - 2.0 * u[s][i] + u[s][i+1]);
 }
 
-void borders_filling(int rank, int size, double *u[2], int s, int mem)
+int get_borders_initial(int rank, int size, int *st, int *fn, int N, int out)
 {
-	if (!rank)
-		u[!s][0] = u[s][0];
-	else 
-		border_filling_neigh(rank, u, s, 0);
-
+	int perproc = N / size;
+	*st = 1 + rank * perproc;
+	*fn = (rank + 1) * perproc;
 	if (rank == size - 1)
-		u[!s][mem - 1] = u[s][mem - 1];
-	else 
-		border_filling_neigh(rank, u, s, mem - 1);
+		*fn = N;
 
+	if (out)
+		printf("get_borders_initial: rank = %d, borders: st = %d, fn = %d\n",\
+		rank, *st, *fn);
+	return 0;
 }
 
-void border_filling_neigh(int rank, double *u[2], int s, int index) 
+void borders_filling(int rank, int size, double *u[2], int s, int mem, int out)
 {
-	if (rank%2) {
-		MPI_Send(&u[s][index], 1, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD);
-		MPI_Recv(&u[!s][index], 1, MPI_DOUBLE, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	double *st_snd = u[s] + 1; // pointer to the element to pass to smaller rank.
+	double *fn_snd = u[s] + mem - 2; // pointer to the element to pass to bigger rank.
+
+	double *st_rec = u[!s]; // pointer to the element to rec from smaller rank.
+	double *fn_rec = u[!s] + mem - 1; // pointer to the element to rec from bigger rank.
+
+	if (!(rank % 2)) {
+		if (rank != size - 1) { // send to bigger rank. rec from bigger rank.
+			MPI_Send(fn_snd, 1, MPI_DOUBLE, rank + 1, 0, MPI_COMM_WORLD);
+			MPI_Recv(fn_rec, 1, MPI_DOUBLE, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		} else 
+			u[!s][mem - 1] = u[s][mem - 1];
+
+		if (rank) { // rec from smaller. send to smaller.
+			MPI_Recv(st_rec, 1, MPI_DOUBLE, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+			MPI_Send(st_snd, 1, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD);
+		} else 
+			u[!s][0] = u[s][0];
 	} else {
-		MPI_Recv(&u[!s][index], 1, MPI_DOUBLE, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		MPI_Send(&u[s][index], 1, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD);
+		// rec from smaller. send to smaller.
+		MPI_Recv(st_rec, 1, MPI_DOUBLE, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		MPI_Send(st_snd, 1, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD);
+
+		if (rank != size - 1) { // send to bigger. rec from bigger.
+			MPI_Send(fn_snd, 1, MPI_DOUBLE, rank + 1, 0, MPI_COMM_WORLD);
+			MPI_Recv(fn_rec, 1, MPI_DOUBLE, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		} else
+			u[!s][mem - 1] = u[s][mem - 1];
 	}
+
 }
 
 
@@ -336,66 +376,6 @@ int reallocate_snd(int rank, double *u_dst, double *u_src, int st, int fn, int s
 	return 0;
 }
 
-int get_borders_initial(int rank, int size, int *st, int *fn, double rate, int N, int out)
-{
-	if (!rank) {
-		double *rates = (double *)calloc(size, sizeof(double));
-		assert(rates);
-		rates[0] = rate;
-		int *sts = (int *)calloc(size, sizeof(int));
-		int *fns = (int *)calloc(size, sizeof(int));
-		int i = 0;
-		for (i = 1; i < size; i++)
-			MPI_Recv(rates + i, 1, MPI_DOUBLE, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		get_borders_initial_divide_proportion(size, rates, sts, fns, N, out);	
-
-		for (i = 1; i < size; i++) {
-			int params[2] = {};
-			params[0] = sts[i];
-			params[1] = fns[i];
-			MPI_Send(params, 2, MPI_INT, i, 0, MPI_COMM_WORLD); // Try MPI_Ibsend 
-		}
-		*st = sts[0];
-		*fn = fns[0];
-		free(rates);
-		free(sts);
-		free(fns);
-	} else {
-		MPI_Send(&rate, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-		int params[2] = {};
-		MPI_Recv(params, 2, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		*st = params[0];
-		*fn = params[1];
-	}
-	if (out)
-		printf("Rank = %d. Size = %d. Rate = %f. Borders: st = %d, fn = %d.\n",\
-		rank, size, rate, *st, *fn);
-
-	return 0;
-}
-
-
-void get_borders_initial_divide_proportion(int size, double *rates, int *sts, int *fns, int N, int out) 
-{
-	double total_rate = 0;
-	for (int i = 0; i < size; i++)
-		total_rate += rates[i];
-
-	if (out) {
-		printf("Rates:\n");
-		for (int i = 0; i < size; i++)
-			printf("%f ", rates[i]);
-		printf("\ntotal_rate = %f\n", total_rate);
-	}
-	sts[0] = 1;
-	for (int i = 0; i < size - 1; i++) {
-		fns[i] = sts[i] + (int) (rates[i] * N / total_rate);
-		sts[i + 1] = fns[i] + 1;		
-	}
-	
-	fns[size - 1] = N;
-}
-
 
 void test_task(int param)
 {
@@ -415,4 +395,54 @@ double get_rate(int param)
 	test_task(param);
 	double time_duration = MPI_Wtime() - time_start;
 	return 1/time_duration;
+}
+
+
+void send_results(int rank, int st, int fn, double *u, int out)
+{
+	int data_size = max(fn - st + 1, 0);
+
+	if (out == DETAILED_PRINT)
+		printf("send_results: (sending) rank = %d, data_size = %d (st = %d, fn = %d)\n",\
+		 rank, data_size, st, fn);
+	
+	MPI_Send(&data_size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
+	MPI_Send(u + 1, data_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+	if (out)
+		printf("send_results: (sent) rank = %d, data_size = %d\n", rank, data_size);
+}
+
+double* collect_results(int size, int st, int fn, int N, double *u, int out) 
+{
+	double *res = (double *)calloc(N, sizeof(double));
+	assert(res);
+
+	double *pointer = res;
+
+	int data_size = max(fn - st + 1, 0);
+	memcpy(pointer, u + 1, data_size * sizeof(double));
+	pointer += data_size;
+	
+	if (out)
+		printf("collect_results: (copied) rank = 0, data_size = %d\n", data_size);	
+	for (int i = 1; i < size; i++) {
+		if (out == DETAILED_PRINT)
+			printf("collect_results: (receiving) rank = %d\n", i);
+			
+		MPI_Recv(&data_size, 1, MPI_INT, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		MPI_Recv(pointer, data_size, MPI_DOUBLE, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+		pointer += data_size;
+
+		if (out)
+			printf("collect_results: (received) rank = %d, data_size = %d\n", i, data_size);
+	}
+	return res;
+}
+
+void print_results(double *res, int N)
+{
+	printf("print_res:\n");
+	for (int i = 0; i < N; i++)
+		printf("%f ", res[i]);
+	printf("\n");
 }

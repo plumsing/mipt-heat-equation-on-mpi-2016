@@ -28,7 +28,7 @@ if __name__ == '__main__':
 	C = 1 # Constant to set  dt = 0.3 * h * h / C, where h = L/(N-1)
 	out = 1 # Don't need to print results
 	test_difficulty = 1000000 # Approximately 0.01 sec for this test.
-	iters_between_tests = 100
+	iters_between_tests = 0
 	regularization = 0.1
 	print("N = {}, Time = {}".format(N, Time))
 
@@ -39,6 +39,7 @@ if __name__ == '__main__':
 			str(T1), str(T2), str(TS), str(C), str(out), str(test_difficulty),\
 			 str(iters_between_tests), str(regularization)]
 
+	print(' '.join(map(str,cmd)))
+
 	print(cmd)
 	print(subprocess.check_output(cmd).decode("utf-8")) # Change to string
-
