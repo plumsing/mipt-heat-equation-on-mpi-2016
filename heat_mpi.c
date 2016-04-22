@@ -50,7 +50,7 @@ int main(int argc, char **argv)
 	assert(alloc_mem(u, fn - st + 3));
 	init_memory(u[0], st, fn, N, TS, T1, T2);
 
-	evaluate(rank, size, u, st, fn, steps, iters_test, test_diffic, regularization, out);	
+	evaluate(rank, size, u, &st, &fn, steps, iters_test, test_diffic, regularization, out);	
 
 	double *res = 0;
 
@@ -68,7 +68,7 @@ int main(int argc, char **argv)
 	return 0;
 }
 
-void evaluate(int rank, int size, double *u[2], int st, int fn, int steps, int iters_test, int test_diffic, double regularization, int out)
+void evaluate(int rank, int size, double *u[2], int *st, int *fn, int steps, int iters_test, int test_diffic, double regularization, int out)
 {
 
 	int s = 0; // denotes the index of array with actual data.
@@ -76,18 +76,18 @@ void evaluate(int rank, int size, double *u[2], int st, int fn, int steps, int i
 	printf("evaluate: total steps = %d\n", steps);
 	for (int i = 0; i < steps; i++) {
 		if (out == DETAILED_PRINT)
-			printf("evaluate: step = %d, rank = %d, borders: st = %d, fn = %d.\n", i, rank, st, fn);
+			printf("evaluate: step = %d, rank = %d, borders: st = %d, fn = %d.\n", i, rank, *st, *fn);
 		if (iters_test && !(i % iters_test)) {
 			double rate = get_rate(test_diffic);
-			resize_tasks(test_kind, s, rank, size, u, &st, &fn, rate, regularization, out);
+			resize_tasks(test_kind, s, rank, size, u, st, fn, rate, regularization, out);
 			if (out)
 				printf("evaluate: step = %d, recalib = %d, rank = %d, borders: st_new = %d, fn_new = %d.\n",\
-				i, i / iters_test, rank, st, fn);
+				i, i / iters_test, rank, *st, *fn);
 			test_kind = !test_kind;
 		}	
-		print_results(u[s], fn - st + 3);
-		make_step(u, s, fn - st + 3);
-		borders_filling(rank, size, u, s, fn - st + 3, out);
+		print_results(u[s], *fn - *st + 3);
+		make_step(u, s, *fn - *st + 3);
+		borders_filling(rank, size, u, s, *fn - *st + 3, out);
 		s = !s;
 	}
 }
@@ -346,6 +346,8 @@ int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn
 	return 0;
 }
 
+// should work of reallocate_rcv and reallocate_snd.
+
 int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
 {
 
@@ -371,12 +373,12 @@ int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int s
 int reallocate_snd(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
 {
 	int to_send = (fn - st) - (fn_new - st_new); // How many doubles should send.
-	double *src_sdmem = u_src; // address, from which doubles will be sent to neigh.
+	double *src_sdmem = u_src + 1; // address, from which doubles will be sent to neigh.
 	double *src_cpmem = u_src; // address, from which doubles will be copied to u_dst.
 
 	int rank_neigh = rank - 1;
 	if (fn != fn_new) { // Here fn > fn_new; st == st_new
-		src_sdmem += fn_new - st_new + 3;
+		src_sdmem += fn_new - st_new + 1;
 		rank_neigh += 2;
 	} else  // Here fn == fn_new; st < st_new
 		src_cpmem += st_new - st;
