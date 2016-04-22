@@ -85,7 +85,7 @@ void evaluate(int rank, int size, double *u[2], int st, int fn, int steps, int i
 				i, i / iters_test, rank, st, fn);
 			test_kind = !test_kind;
 		}	
-		// print_results(u[!s], fn - st + 3);
+		print_results(u[s], fn - st + 3);
 		make_step(u, s, fn - st + 3);
 		borders_filling(rank, size, u, s, fn - st + 3, out);
 		s = !s;
@@ -239,17 +239,25 @@ int get_borders_odd(int test_kind, int rank, int size, int st, int fn, int *st_n
 	return 0;
 }
 
-int should_reallocate(int st, int fn, int st_new, int fn_new, double regularization) 
+int should_reallocate(int test_kind, int rank, int size, int st, int fn, int st_new, int fn_new, double regularization, int out) 
 {
+	int should = 0;
 	if (fn - st <= 0) {
 		if (fn_new - st_new <= 0)
-			return 0;
+			should = 0;
 		else 
-			return 1;
+			should = 1;
 	}
 	if (1 - (fn_new - st_new) / (fn - st) > regularization)
-		return 1;
-	return 0; 
+		should = 1;
+
+	if (out)
+		printf("resize_tasks: rank = %d, should (before exchange) = %d\n", rank, should);
+	should = reallocate_status_exchange(test_kind, rank, size, should);
+	if (out)
+		printf("resize_tasks: rank = %d, should (after exchange) = %d\n", rank, should);
+	
+	return should; 
 }
 
 
@@ -291,18 +299,7 @@ int resize_tasks(int test_kind, int s, int rank, int size, double *u[2], int *st
 			rank, rate, test_kind, *st, *fn, st_new, fn_new);
 
 
-	int should = should_reallocate(*st, *fn, st_new, fn_new, regularization);
-	if (out)
-		printf("resize_tasks: rank = %d, should (before exchange) = %d\n", rank, should);
-	should = reallocate_status_exchange(test_kind, rank, size, should);
-	if (out)
-		printf("resize_tasks: rank = %d, should (after exchange) = %d\n", rank, should);
-	
-	// if (!should) {
-	// 	*st = st_new;
-	// 	*fn = fn_new;
-	// 	return 0;
-	// }
+	int should = should_reallocate(test_kind, rank, size, *st, *fn, st_new, fn_new, regularization, out);
 
 	if (!should)
 		return 0;
@@ -312,7 +309,13 @@ int resize_tasks(int test_kind, int s, int rank, int size, double *u[2], int *st
 	*fn = fn_new;
 
 	return 1;
+}
 
+
+void garbage(double *u, int size, double poison)
+{
+	for (int i = 0; i < size; i++)
+		u[i] = poison;
 }
 
 int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn_new) 
@@ -323,6 +326,9 @@ int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn
 	assert(u_new[0]); // Can handle this case. Just continue with the same arrays.
 	u_new[1] = (double *)calloc(fn_new - st_new + 3, sizeof(double));
 	assert(u_new[1]);
+
+	garbage(u_new[0], fn_new - st_new + 3, 3);
+	garbage(u_new[1], fn_new - st_new + 3, 3);
 
 	double *u_src = u[s]; // Array with actual data.
 	double *u_dst = u_new[s]; // Array, where we want actual data after reallocation.
@@ -342,13 +348,14 @@ int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn
 
 int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
 {
+
 	int to_rec = (fn_new - st_new) - (fn - st); // How many doubles should receive
-	double *dst_rcmem = u_dst + 1; // address, to where doubles will be received.
-	double *dst_cpmem = u_dst + 1; // address, to where doubles will be copied.
+	double *dst_rcmem = u_dst; // address, to where doubles will be received.
+	double *dst_cpmem = u_dst; // address, to where doubles will be copied.
 	
 	int rank_neigh = rank - 1; // From whom I wan't to receive. 
 	if (fn != fn_new) { // st == st_new; fn < fn_new;
-		dst_rcmem += fn - st + 1;
+		dst_rcmem += fn - st + 3;
 		rank_neigh += 2;
 	} else // st_new < st; fn == fn_new;
 		dst_cpmem += st - st_new;
@@ -356,7 +363,7 @@ int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int s
 
 	MPI_Recv(dst_rcmem, to_rec, MPI_DOUBLE, rank_neigh, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 	// fn - st + 1 -> number of bytes that come from old array.
-	memcpy(dst_cpmem, u_src + 1, sizeof(double) * (fn - st + 1));
+	memcpy(dst_cpmem, u_src, sizeof(double) * (fn - st + 3));
 
 	return 0;
 }
@@ -364,19 +371,19 @@ int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int s
 int reallocate_snd(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
 {
 	int to_send = (fn - st) - (fn_new - st_new); // How many doubles should send.
-	double *src_sdmem = u_src + 1; // address, from which doubles will be sent to neigh.
-	double *src_cpmem = u_src + 1; // address, from which doubles will be copied to u_dst.
+	double *src_sdmem = u_src; // address, from which doubles will be sent to neigh.
+	double *src_cpmem = u_src; // address, from which doubles will be copied to u_dst.
 
 	int rank_neigh = rank - 1;
 	if (fn != fn_new) { // Here fn > fn_new; st == st_new
-		src_sdmem += fn_new - st_new + 1;
+		src_sdmem += fn_new - st_new + 3;
 		rank_neigh += 2;
 	} else  // Here fn == fn_new; st < st_new
 		src_cpmem += st_new - st;
 	
 	MPI_Send(src_sdmem, to_send, MPI_DOUBLE, rank_neigh, 0, MPI_COMM_WORLD);
 	// fn_new - st_new + 1 -> number of bytes that come from old array.
-	memcpy(u_dst + 1, src_cpmem, sizeof(double) * (fn_new - st_new + 1)); 
+	memcpy(u_dst, src_cpmem, sizeof(double) * (fn_new - st_new + 3)); 
 
 	return 0;
 }
