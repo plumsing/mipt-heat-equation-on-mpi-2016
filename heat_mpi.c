@@ -264,11 +264,12 @@ int should_reallocate(int test_kind, int rank, int size, int st, int fn, int st_
 int reallocate_status_exchange(int test_kind, int rank, int size, int should)
 {
 	int should_neigh = 0;
+
 	if (!(rank%2)) {
 		if (test_kind && rank != size - 1) {
 			MPI_Recv(&should_neigh, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			MPI_Send(&should, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
-		} else if (rank) {
+		} else if (!test_kind && rank) {
 			MPI_Recv(&should_neigh, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			MPI_Send(&should, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
 		}
@@ -276,7 +277,7 @@ int reallocate_status_exchange(int test_kind, int rank, int size, int should)
 		if (test_kind) {
 			MPI_Send(&should, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
 			MPI_Recv(&should_neigh, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		} else if (rank != size - 1) { 
+		} else if (!test_kind && rank != size - 1) { 
 			MPI_Send(&should, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
 			MPI_Recv(&should_neigh, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		}
