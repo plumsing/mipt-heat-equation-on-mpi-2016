@@ -7,6 +7,14 @@
 
 #define DETAILED_PRINT 2
 
+int check_args(int N, double T, double Length, double T1, double T2, double TS, double C, int iters_test, double regularization)
+{
+	if (N > 0 && T > 0 && Length > 0 && T1 >= 0 && T2 >= 0 && TS >= 0 && C > 0 &&\
+	 iters_test >= 0 && regularization <= 1 && regularization >= 0)
+		return 1;
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 12) {
@@ -21,12 +29,15 @@ int main(int argc, char **argv)
 	double T2 = atof(argv[5]);
 	double TS = atof(argv[6]);
 	double C = atof(argv[7]);
-	double out = atoi(argv[8]);
+	int out = atoi(argv[8]);
 	int test_diffic = atoi(argv[9]);
 	int iters_test = atoi(argv[10]);
 	double regularization = atof(argv[11]);
 
-	assert(N > 0 && T > 0 && Length > 0 && T1 >= 0 && T2 >= 0 && TS >= 0 && C > 0 && iters_test >= 0);
+	if (!check_args(N, T, Length, T1, T2, TS, C, iters_test, regularization)) {
+		printf("Bad arguments\n");
+		return 0;
+	}
 
 	double h =  Length / N;  
 	double dt = 0.3 * h * h / C;
@@ -40,6 +51,7 @@ int main(int argc, char **argv)
 
 	if (out)
 		printf("MPI_Init: Rank = %d, Size = %d\n", rank, size);
+
 
 	int st = 0; 
 	int fn = 0;	
@@ -68,12 +80,14 @@ int main(int argc, char **argv)
 	return 0;
 }
 
+
 void evaluate(int rank, int size, double *u[2], int *st, int *fn, int steps, int iters_test, int test_diffic, double regularization, int out)
 {
 
 	int s = 0; // denotes the index of array with actual data.
 	int test_kind = 1; // 1 - means that even sends to process with bigger number. 0 - vice verse. 
-	printf("evaluate: total steps = %d\n", steps);
+	if (out)
+		printf("evaluate: rank = %d, total steps = %d\n", rank, steps);
 	for (int i = 0; i < steps; i++) {
 		if (out == DETAILED_PRINT)
 			printf("evaluate: step = %d, rank = %d, borders: st = %d, fn = %d.\n", i, rank, *st, *fn);
@@ -85,7 +99,7 @@ void evaluate(int rank, int size, double *u[2], int *st, int *fn, int steps, int
 				i, i / iters_test, rank, *st, *fn);
 			test_kind = !test_kind;
 		}	
-		print_results(u[s], *fn - *st + 3);
+		// print_results(u[s], *fn - *st + 3);
 		make_step(u, s, *fn - *st + 3);
 		borders_filling(rank, size, u, s, *fn - *st + 3, out);
 		s = !s;
@@ -115,11 +129,11 @@ int get_borders_initial(int rank, int size, int *st, int *fn, int N, int out)
 
 void borders_filling(int rank, int size, double *u[2], int s, int mem, int out)
 {
-	double *st_snd = u[s] + 1; // pointer to the element to pass to smaller rank.
-	double *fn_snd = u[s] + mem - 2; // pointer to the element to pass to bigger rank.
+	double *st_snd = &u[!s][1]; // pointer to the element to pass to smaller rank.
+	double *fn_snd = &u[!s][mem - 2]; // pointer to the element to pass to bigger rank.
 
-	double *st_rec = u[!s]; // pointer to the element to rec from smaller rank.
-	double *fn_rec = u[!s] + mem - 1; // pointer to the element to rec from bigger rank.
+	double *st_rec = &u[!s][0]; // pointer to the element to rec from smaller rank.
+	double *fn_rec = &u[!s][mem - 1]; // pointer to the element to rec from bigger rank.
 
 	if (!(rank % 2)) {
 		if (rank != size - 1) { // send to bigger rank. rec from bigger rank.
@@ -328,8 +342,8 @@ int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn
 	u_new[1] = (double *)calloc(fn_new - st_new + 3, sizeof(double));
 	assert(u_new[1]);
 
-	garbage(u_new[0], fn_new - st_new + 3, 3);
-	garbage(u_new[1], fn_new - st_new + 3, 3);
+	garbage(u_new[0], fn_new - st_new + 3, 100);
+	garbage(u_new[1], fn_new - st_new + 3, 100);
 
 	double *u_src = u[s]; // Array with actual data.
 	double *u_dst = u_new[s]; // Array, where we want actual data after reallocation.
@@ -365,7 +379,6 @@ int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int s
 
 
 	MPI_Recv(dst_rcmem, to_rec, MPI_DOUBLE, rank_neigh, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-	// fn - st + 1 -> number of bytes that come from old array.
 	memcpy(dst_cpmem, u_src, sizeof(double) * (fn - st + 3));
 
 	return 0;
@@ -374,12 +387,12 @@ int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int s
 int reallocate_snd(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
 {
 	int to_send = (fn - st) - (fn_new - st_new); // How many doubles should send.
-	double *src_sdmem = u_src + 1; // address, from which doubles will be sent to neigh.
+	double *src_sdmem = u_src + 2; // address, from which doubles will be sent to neigh.
 	double *src_cpmem = u_src; // address, from which doubles will be copied to u_dst.
 
 	int rank_neigh = rank - 1;
-	if (fn != fn_new) { // Here fn > fn_new; st == st_new
-		src_sdmem += fn_new - st_new + 1;
+	if (fn != fn_new) { // Here fn_new < fn; st == st_new
+		src_sdmem += fn_new - st_new - 1;
 		rank_neigh += 2;
 	} else  // Here fn == fn_new; st < st_new
 		src_cpmem += st_new - st;
