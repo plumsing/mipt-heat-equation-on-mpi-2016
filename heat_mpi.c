@@ -4,16 +4,9 @@
 #include <assert.h>
 #include <string.h>
 #include "heat_mpi.h"
-
+	
 #define DETAILED_PRINT 2
 
-int check_args(int N, double T, double Length, double T1, double T2, double TS, double C, int iters_test, double regularization)
-{
-	if (N > 0 && T > 0 && Length > 0 && T1 >= 0 && T2 >= 0 && TS >= 0 && C > 0 &&\
-	 iters_test >= 0 && regularization <= 1 && regularization >= 0)
-		return 1;
-	return 0;
-}
 
 int main(int argc, char **argv)
 {
@@ -40,8 +33,12 @@ int main(int argc, char **argv)
 	}
 
 	double h =  Length / N;  
-	double dt = 0.3 * h * h / C;
-	int steps = T / dt;
+	// double dt = 0.3 * h * h / C; 
+	// int steps = T / dt;
+
+	// To see if program scales. In current difference scheme it will not work, because t ~ O(h^2)
+	int steps = 10000;
+
 	assert(steps > 0);
 	
 	int rank, size;
@@ -52,17 +49,24 @@ int main(int argc, char **argv)
 	if (out)
 		printf("MPI_Init: Rank = %d, Size = %d\n", rank, size);
 
-
-	int st = 0; 
-	int fn = 0;	
+	// Starting and finishing indexes of the grid. Can be from 1 to N. 
+	// Algorithms evaluates cells from starting to finishing inclusively.
+	int st = 0;
+	int fn = 0; 
 
 	get_borders_initial(rank, size, &st, &fn, N, out);
 	
 	double *u[2] = {};
 	assert(alloc_mem(u, fn - st + 3));
-	init_memory(u[0], st, fn, N, TS, T1, T2);
+	init_temperature(u[0], st, fn, N, TS, T1, T2);
 
+	double time_start = MPI_Wtime();
 	evaluate(rank, size, u, &st, &fn, steps, iters_test, test_diffic, regularization, out);	
+
+	if (!rank) {
+		printf("%f", MPI_Wtime() - time_start);
+		printf("\n");
+	}
 
 	double *res = 0;
 
@@ -72,48 +76,76 @@ int main(int argc, char **argv)
 		send_results(rank, st, fn, u[0], out);
 	dealloc_mem(u);
 
-	if (!rank)
-		print_results(res, N);
+	// if (!rank)
+	// 	print_results(res, N, out);
 	free(res);
 
 	MPI_Finalize();
 	return 0;
 }
 
+int check_args(int N, double T, double Length, double T1, double T2, double TS, double C, int iters_test, double regularization)
+{
+	if (N > 0 && T > 0 && Length > 0 && T1 >= 0 && T2 >= 0 && TS >= 0 && C > 0 &&\
+	 iters_test >= 0 && regularization <= 1 && regularization >= 0)
+		return 1;
+	return 0;
+}
 
 void evaluate(int rank, int size, double *u[2], int *st, int *fn, int steps, int iters_test, int test_diffic, double regularization, int out)
+/* Main function that perfoms all computation. Assumes that u[0] contains valid temperature data. 
+Makes number of steps = steps. After each number of iter_test steps performs recalculation of cells number
+for current processor. Uses по-очереди? on the right on the left diffusion to do this. 
+test_diffic computes the nodes rate. regularization - percentage of rate difference to be tolerated.*/
 {
-
 	int s = 0; // denotes the index of array with actual data.
-	int test_kind = 1; // 1 - means that even sends to process with bigger number. 0 - vice verse. 
+	int exchange_kind = 1; // 1 - means that even sends to process with bigger number. 0 - vice verse. 
+	
 	if (out)
 		printf("evaluate: rank = %d, total steps = %d\n", rank, steps);
+	
 	for (int i = 0; i < steps; i++) {
 		if (out == DETAILED_PRINT)
-			printf("evaluate: step = %d, rank = %d, borders: st = %d, fn = %d.\n", i, rank, *st, *fn);
+			printf("evaluate: rank = %d, step = %d, borders: st = %d, fn = %d.\n", rank, i, *st, *fn);
 		if (iters_test && !(i % iters_test)) {
 			double rate = get_rate(test_diffic);
-			resize_tasks(test_kind, s, rank, size, u, st, fn, rate, regularization, out);
+
+			//Here is intentional reducing of rate to test if algorithm holds this situation.
+			if (rank == 0)
+				rate /= 8;	
+
+			resize_tasks(exchange_kind, s, rank, size, u, st, fn, rate, regularization, out);
 			if (out)
-				printf("evaluate: step = %d, recalib = %d, rank = %d, borders: st_new = %d, fn_new = %d.\n",\
-				i, i / iters_test, rank, *st, *fn);
-			test_kind = !test_kind;
+				printf("evaluate: rank = %d, step = %d, recalib = %d, borders: st_new = %d, fn_new = %d.\n",\
+				rank, i, i / iters_test, *st, *fn);
+			exchange_kind = !exchange_kind; // exchange direction reversed.
 		}	
 		// print_results(u[s], *fn - *st + 3);
 		make_step(u, s, *fn - *st + 3);
-		borders_filling(rank, size, u, s, *fn - *st + 3, out);
+
+		// Here is intentional reducting the performance
+		if (rank == 0) {
+			for (int i = 0; i < 7; i++)
+				make_step(u, s, *fn - *st + 3);
+		}
+
+		borders_temperature_exchange(rank, size, u, s, *fn - *st + 3, out);
 		s = !s;
 	}
 }
 
 void make_step(double *u[2], int s, int mem)
+/* Makes one step of evaluation.
+s - source array index, !s - destination array index. 
+mem - total size of current array. */
 {
-	// mem - is the size of the current array.
 	for (int i = 1; i < mem - 1; i++)
 		u[!s][i] =  u[s][i] + 0.3 * (u[s][i-1] - 2.0 * u[s][i] + u[s][i+1]);
 }
 
 int get_borders_initial(int rank, int size, int *st, int *fn, int N, int out)
+/* Assigns borders to processes. Uniform distribution 
+(each process has approximatelly equal number of cells to evaluate). */
 {
 	int perproc = N / size;
 	*st = 1 + rank * perproc;
@@ -127,7 +159,10 @@ int get_borders_initial(int rank, int size, int *st, int *fn, int N, int out)
 	return 0;
 }
 
-void borders_filling(int rank, int size, double *u[2], int s, int mem, int out)
+void borders_temperature_exchange(int rank, int size, double *u[2], int s, int mem, int out)
+/* Sends st and fn elements and receives st-1, fn+1 (if not nodes on edge).
+Even rank: 1) snd fn to bigger 2) rcv fn+1 from bigger 3) rcv  st-1 from smaller 4) snd st to smaller.
+Odd rank: 1) rcv st-1 from smaller 2) snd st to smaller 3) snd fn to bigger 4) rcv fn + 1 from smaller. */
 {
 	double *st_snd = &u[!s][1]; // pointer to the element to pass to smaller rank.
 	double *fn_snd = &u[!s][mem - 2]; // pointer to the element to pass to bigger rank.
@@ -145,7 +180,7 @@ void borders_filling(int rank, int size, double *u[2], int s, int mem, int out)
 		if (rank) { // rec from smaller. send to smaller.
 			MPI_Recv(st_rec, 1, MPI_DOUBLE, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			MPI_Send(st_snd, 1, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD);
-		} else 
+		} else // Node on left border.
 			u[!s][0] = u[s][0];
 	} else {
 		// rec from smaller. send to smaller.
@@ -155,10 +190,9 @@ void borders_filling(int rank, int size, double *u[2], int s, int mem, int out)
 		if (rank != size - 1) { // send to bigger. rec from bigger.
 			MPI_Send(fn_snd, 1, MPI_DOUBLE, rank + 1, 0, MPI_COMM_WORLD);
 			MPI_Recv(fn_rec, 1, MPI_DOUBLE, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		} else
+		} else // Node on right border. 
 			u[!s][mem - 1] = u[s][mem - 1];
 	}
-
 }
 
 
@@ -169,7 +203,9 @@ int max(int a, int b)
 	return b;
 }
 
-int	init_memory(double *u, int st, int fn, int N, double TS, double T1, double T2)
+int	init_temperature(double *u, int st, int fn, int N, double TS, double T1, double T2)
+/* Initiates temperature in u array with TS - starting temperature. 
+If it is a border node, makes an appropriate temperature on border: T1 - left, T2 - right.*/
 {
 	int mem = fn - st + 1 + 2;
 	for (int i = 0; i < mem; i++)
@@ -183,6 +219,7 @@ int	init_memory(double *u, int st, int fn, int N, double TS, double T1, double T
 
 
 int alloc_mem(double *u[2], int req_mem) 
+/* Allocates 2 arrays. Returns 0 if allocation fails, 1 if success.*/ 
 {
 	u[0] = (double *)calloc(req_mem, sizeof(double));
 	if (!u[0])
@@ -201,25 +238,54 @@ void dealloc_mem(double *u[2])
 	free(u[1]);
 }
 
-int get_borders_even(int test_kind, int rank, int size, int st, int fn, int *st_new, int *fn_new, double rate)
+
+int resize_tasks(int exchange_kind, int s, int rank, int size, double *u[2], int *st, int *fn, double rate, double regularization, int out)
+/* Make size resizing. */ 
+{
+	int st_new = 0;
+	int fn_new = 0;
+
+	if (!(rank%2))
+		get_borders_even(exchange_kind, rank, size, *st, *fn, &st_new, &fn_new, rate);
+	else 
+		get_borders_odd(exchange_kind, rank, size, *st, *fn, &st_new, &fn_new, rate);
+
+	if (out)
+		printf("resize_tasks: rank = %d, rate = %f, exchange_kind = %d, st = %d, fn = %d, st_new = %d, fn_new = %d\n",\
+			rank, rate, exchange_kind, *st, *fn, st_new, fn_new);
+
+
+	int should = should_reallocate(exchange_kind, rank, size, *st, *fn, st_new, fn_new, regularization, out);
+
+	if (!should)
+		return 0;
+
+	reallocate(rank, s, u, *st, *fn, st_new, fn_new);
+	*st = st_new;
+	*fn = fn_new;
+
+	return 1;
+}
+
+int get_borders_even(int exchange_kind, int rank, int size, int st, int fn, int *st_new, int *fn_new, double rate)
 {
 	double rate_neigh = 0;
-	if (test_kind && rank != size - 1) {
+	if (exchange_kind && rank != size - 1) {
 		MPI_Recv(&rate_neigh, 1, MPI_DOUBLE, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		MPI_Recv(&fn, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		
-		int middle = (int) rate * (fn - st) / (rate + rate_neigh);
+		int middle = (int) (rate * (double)(fn - st) / (double)(rate + rate_neigh));
 		
 		*st_new = st;
 		*fn_new = st + middle;
 
 		int st_neigh = st + middle + 1;
 		MPI_Send(&st_neigh, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);	
-	} else if (!test_kind && rank) { 
+	} else if (!exchange_kind && rank) { 
 		MPI_Recv(&rate_neigh, 1, MPI_DOUBLE, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		MPI_Recv(&st, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-		int middle = (int) rate * (fn - st) / (rate + rate_neigh);
+		int middle = (int) (rate * (double)(fn - st) / (double)(rate + rate_neigh));
 		*st_new = st + middle + 1;
 		*fn_new = fn;
 		int fn_neigh = st + middle;
@@ -232,9 +298,9 @@ int get_borders_even(int test_kind, int rank, int size, int st, int fn, int *st_
 }
 
 
-int get_borders_odd(int test_kind, int rank, int size, int st, int fn, int *st_new, int *fn_new, double rate)
+int get_borders_odd(int exchange_kind, int rank, int size, int st, int fn, int *st_new, int *fn_new, double rate)
 {
-	if (test_kind) {
+	if (exchange_kind) {
 		MPI_Send(&rate, 1, MPI_DOUBLE, rank - 1, 0, MPI_COMM_WORLD);
 		MPI_Send(&fn, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
 
@@ -253,7 +319,7 @@ int get_borders_odd(int test_kind, int rank, int size, int st, int fn, int *st_n
 	return 0;
 }
 
-int should_reallocate(int test_kind, int rank, int size, int st, int fn, int st_new, int fn_new, double regularization, int out) 
+int should_reallocate(int exchange_kind, int rank, int size, int st, int fn, int st_new, int fn_new, double regularization, int out) 
 {
 	int should = 0;
 	if (fn - st <= 0) {
@@ -267,7 +333,7 @@ int should_reallocate(int test_kind, int rank, int size, int st, int fn, int st_
 
 	if (out)
 		printf("resize_tasks: rank = %d, should (before exchange) = %d\n", rank, should);
-	should = reallocate_status_exchange(test_kind, rank, size, should);
+	should = reallocate_status_exchange(exchange_kind, rank, size, should);
 	if (out)
 		printf("resize_tasks: rank = %d, should (after exchange) = %d\n", rank, should);
 	
@@ -275,62 +341,28 @@ int should_reallocate(int test_kind, int rank, int size, int st, int fn, int st_
 }
 
 
-int reallocate_status_exchange(int test_kind, int rank, int size, int should)
+int reallocate_status_exchange(int exchange_kind, int rank, int size, int should)
 {
 	int should_neigh = 0;
 
 	if (!(rank%2)) {
-		if (test_kind && rank != size - 1) {
+		if (exchange_kind && rank != size - 1) {
 			MPI_Recv(&should_neigh, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			MPI_Send(&should, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
-		} else if (!test_kind && rank) {
+		} else if (!exchange_kind && rank) {
 			MPI_Recv(&should_neigh, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			MPI_Send(&should, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
 		}
 	} else {
-		if (test_kind) {
+		if (exchange_kind) {
 			MPI_Send(&should, 1, MPI_INT, rank - 1, 0, MPI_COMM_WORLD);
 			MPI_Recv(&should_neigh, 1, MPI_INT, rank - 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		} else if (!test_kind && rank != size - 1) { 
+		} else if (!exchange_kind && rank != size - 1) { 
 			MPI_Send(&should, 1, MPI_INT, rank + 1, 0, MPI_COMM_WORLD);
 			MPI_Recv(&should_neigh, 1, MPI_INT, rank + 1, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		}
 	}
 	return max(should, should_neigh);
-}
-
-int resize_tasks(int test_kind, int s, int rank, int size, double *u[2], int *st, int *fn, double rate, double regularization, int out) 
-{
-	int st_new = 0;
-	int fn_new = 0;
-
-	if (!(rank%2))
-		get_borders_even(test_kind, rank, size, *st, *fn, &st_new, &fn_new, rate);
-	else 
-		get_borders_odd(test_kind, rank, size, *st, *fn, &st_new, &fn_new, rate);
-
-	if (out)
-		printf("resize_tasks: rank = %d, rate = %f, test_kind = %d, st = %d, fn = %d, st_new = %d, fn_new = %d\n",\
-			rank, rate, test_kind, *st, *fn, st_new, fn_new);
-
-
-	int should = should_reallocate(test_kind, rank, size, *st, *fn, st_new, fn_new, regularization, out);
-
-	if (!should)
-		return 0;
-
-	reallocate(rank, s, u, *st, *fn, st_new, fn_new);
-	*st = st_new;
-	*fn = fn_new;
-
-	return 1;
-}
-
-
-void garbage(double *u, int size, double poison)
-{
-	for (int i = 0; i < size; i++)
-		u[i] = poison;
 }
 
 int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn_new) 
@@ -341,9 +373,6 @@ int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn
 	assert(u_new[0]); // Can handle this case. Just continue with the same arrays.
 	u_new[1] = (double *)calloc(fn_new - st_new + 3, sizeof(double));
 	assert(u_new[1]);
-
-	garbage(u_new[0], fn_new - st_new + 3, 100);
-	garbage(u_new[1], fn_new - st_new + 3, 100);
 
 	double *u_src = u[s]; // Array with actual data.
 	double *u_dst = u_new[s]; // Array, where we want actual data after reallocation.
@@ -431,13 +460,13 @@ void send_results(int rank, int st, int fn, double *u, int out)
 	int data_size = max(fn - st + 1, 0);
 
 	if (out == DETAILED_PRINT)
-		printf("send_results: (sending) rank = %d, data_size = %d (st = %d, fn = %d)\n",\
+		printf("send_results: rank = %d, data_size = %d (st = %d, fn = %d) (sending)\n",\
 		 rank, data_size, st, fn);
 	
 	MPI_Send(&data_size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
 	MPI_Send(u + 1, data_size, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
 	if (out)
-		printf("send_results: (sent) rank = %d, data_size = %d\n", rank, data_size);
+		printf("send_results: rank = %d, data_size = %d\n (sent)", rank, data_size);
 }
 
 double* collect_results(int size, int st, int fn, int N, double *u, int out) 
@@ -452,24 +481,25 @@ double* collect_results(int size, int st, int fn, int N, double *u, int out)
 	pointer += data_size;
 	
 	if (out)
-		printf("collect_results: (copied) rank = 0, data_size = %d\n", data_size);	
+		printf("collect_results: rank = 0, data_size = %d (copied)\n", data_size);	
 	for (int i = 1; i < size; i++) {
 		if (out == DETAILED_PRINT)
-			printf("collect_results: (receiving) rank = %d\n", i);
+			printf("collect_results: rank = %d (receiving)\n", i);
 			
 		MPI_Recv(&data_size, 1, MPI_INT, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		MPI_Recv(pointer, data_size, MPI_DOUBLE, i, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 		pointer += data_size;
 
 		if (out)
-			printf("collect_results: (received) rank = %d, data_size = %d\n", i, data_size);
+			printf("collect_results: rank = %d, data_size = %d (received)\n", i, data_size);
 	}
 	return res;
 }
 
-void print_results(double *res, int N)
+void print_results(double *res, int N, int out)
 {
-	printf("print_res:\n");
+	if (out)
+		printf("print_res:\n");
 	for (int i = 0; i < N; i++)
 		printf("%f ", res[i]);
 	printf("\n");
