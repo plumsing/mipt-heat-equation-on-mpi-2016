@@ -6,6 +6,7 @@
 #define T1 1.0
 #define T2 2.0
 
+/* Computes heat equation using only one node. No MPI. */
 int main(int argc, char **argv)
 {
 	if (argc < 3) {
