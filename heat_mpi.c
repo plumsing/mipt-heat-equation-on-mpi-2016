@@ -240,7 +240,7 @@ void dealloc_mem(double *u[2])
 
 
 int resize_tasks(int exchange_kind, int s, int rank, int size, double *u[2], int *st, int *fn, double rate, double regularization, int out)
-/* Make size resizing. */ 
+/* Exchange rates and makes number of cells resizing. */ 
 {
 	int st_new = 0;
 	int fn_new = 0;
@@ -320,6 +320,7 @@ int get_borders_odd(int exchange_kind, int rank, int size, int st, int fn, int *
 }
 
 int should_reallocate(int exchange_kind, int rank, int size, int st, int fn, int st_new, int fn_new, double regularization, int out) 
+/* Checks own reallocate status and exchanges it with partner. If one of nodes wants to reallocate - reallocation happens.*/
 {
 	int should = 0;
 	if (fn - st <= 0) {
@@ -366,6 +367,7 @@ int reallocate_status_exchange(int exchange_kind, int rank, int size, int should
 }
 
 int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn_new) 
+/* Reallocation procedure. */
 {
 	double *u_new[2] = {}; // To initiate new mem.
 
@@ -376,9 +378,9 @@ int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn
 
 	double *u_src = u[s]; // Array with actual data.
 	double *u_dst = u_new[s]; // Array, where we want actual data after reallocation.
-	if (fn - st < fn_new - st_new) 
+	if (fn - st < fn_new - st_new) // Node needs to receive data.
 		reallocate_rcv(rank, u_dst, u_src, st, fn, st_new, fn_new);
-	else
+	else // Node needs to send data.
 		reallocate_snd(rank, u_dst, u_src, st, fn, st_new, fn_new);
 
 	free(u[0]);
@@ -390,9 +392,9 @@ int reallocate(int rank, int s, double *u[2], int st, int fn, int st_new, int fn
 	return 0;
 }
 
-// should work of reallocate_rcv and reallocate_snd.
 
 int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
+/* This function is called if node needs to receive data after resizing. */
 {
 
 	int to_rec = (fn_new - st_new) - (fn - st); // How many doubles should receive
@@ -414,6 +416,7 @@ int reallocate_rcv(int rank, double *u_dst, double *u_src, int st, int fn, int s
 }
 
 int reallocate_snd(int rank, double *u_dst, double *u_src, int st, int fn, int st_new, int fn_new)
+/* This function is called if node needs to send data after resizing. */
 {
 	int to_send = (fn - st) - (fn_new - st_new); // How many doubles should send.
 	double *src_sdmem = u_src + 2; // address, from which doubles will be sent to neigh.
@@ -433,8 +436,17 @@ int reallocate_snd(int rank, double *u_dst, double *u_src, int st, int fn, int s
 	return 0;
 }
 
+double get_rate(int param)
+/* Function that returns rate ("speed") of current node. */
+{
+	double time_start = MPI_Wtime();
+	test_task(param);
+	double time_duration = MPI_Wtime() - time_start;
+	return 1/time_duration;
+}
 
 void test_task(int param)
+/* Testing task that is performed to measure speed. */
 {
 	int i = 0;
 	int a[2] = {};
@@ -446,16 +458,8 @@ void test_task(int param)
 	}
 }
 
-double get_rate(int param)
-{
-	double time_start = MPI_Wtime();
-	test_task(param);
-	double time_duration = MPI_Wtime() - time_start;
-	return 1/time_duration;
-}
-
-
 void send_results(int rank, int st, int fn, double *u, int out)
+/* Sending results to zero node. */
 {
 	int data_size = max(fn - st + 1, 0);
 
@@ -470,6 +474,7 @@ void send_results(int rank, int st, int fn, double *u, int out)
 }
 
 double* collect_results(int size, int st, int fn, int N, double *u, int out) 
+/* When zero node calls this function it collects results from all other nodes. */
 {
 	double *res = (double *)calloc(N, sizeof(double));
 	assert(res);
