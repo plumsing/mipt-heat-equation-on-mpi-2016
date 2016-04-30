@@ -12,4 +12,4 @@ heat_no_mpi:
 	gcc $(CFLAGS) -o heat_no_mpi heat_no_mpi.c
 
 clean:
-	rm heat_mpi heat_simple_mpi heat_no_mpi	
+	rm heat_mpi heat_simple_mpi heat_no_mpi	*.txt
