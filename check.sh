@@ -1,4 +1,5 @@
 #!./roundup
+# Checking of heat_no_mpi and heat_simple_mpi. Doesn't cover main program. 
 make
 heat='heat_no_mpi'
 heat_mpi='heat_simple_mpi'
